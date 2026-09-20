@@ -936,11 +936,14 @@ def render_frame(state):
     sep_gap = 14
     y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + 2 * sep_gap)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
-    # Fear & Greed's value sits closer under its label than a full row down
-    # (was aligned with ETH's row) - but still clear of BTC's own price/
-    # trend-arrow line just above it, which runs wider than the label alone.
+    # Just the number, not "71 Greed" - the full text is as wide as BTC's
+    # own price+trend-arrow line, which extends well past where this column
+    # starts, so keeping the label's width meant the value could only sit
+    # far enough down to clear it (barely different from a full row below).
+    # The bare number is narrow enough to shift further right, clear of the
+    # arrow entirely, and sit right under the label instead.
     draw.text((x1 + right_off, y), "Fear & Greed", font=LABEL_FONT, fill=LABEL_COLOR)
-    draw.text((x1 + right_off, y + LABEL_FONT.size + 6 + HERO_VALUE_FONT.size), state.get("fear_greed", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
+    draw.text((x1 + right_off + 90, y + LABEL_FONT.size + 6), state.get("fear_greed_num", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
     y += hero_row_h
@@ -1169,6 +1172,7 @@ def main():
             if "fear_greed" in pending:
                 fg = pending["fear_greed"]
                 state["fear_greed"] = f"{fg['value']} {fg['label']}"
+                state["fear_greed_num"] = str(fg["value"])
             if "weather" in pending:
                 w = pending["weather"]
                 state["weather_playa"] = w.get("Playa del Ingles", "--")
