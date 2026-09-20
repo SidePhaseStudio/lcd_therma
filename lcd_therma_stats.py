@@ -12,7 +12,7 @@ import psutil
 import requests
 import usb.core
 import usb.util
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageStat
 
 
 def log(msg):
@@ -42,6 +42,13 @@ WIDTH = 1920
 HEIGHT = 480
 SAMPLE_SECONDS = float(os.environ.get("LCD_SAMPLE_SECONDS", "2.0"))
 JPEG_QUALITY = int(os.environ.get("LCD_JPEG_QUALITY", "85"))
+# Experiment: the panel reboots itself internally (Thermalright boot logo,
+# then our display comes back) with zero trace at the USB/kernel level ever
+# seen - consistent with the panel's own internal power regulation browning
+# out under peak backlight load rather than anything on the host side.
+# Dimming output slightly is a cheap, reversible test of that theory.
+# 1.0 = no change; <1.0 darkens.
+BRIGHTNESS_FACTOR = float(os.environ.get("LCD_BRIGHTNESS_FACTOR", "0.85"))
 WAN_CHECK_URL = os.environ.get(
     "LCD_WAN_CHECK_URL", "https://www.gstatic.com/generate_204"
 )
@@ -204,9 +211,14 @@ class LyPanel:
         if not self._handshaked:
             self._handshake()
 
+        rgb = img.convert("RGB")
+        if BRIGHTNESS_FACTOR != 1.0:
+            rgb = ImageEnhance.Brightness(rgb).enhance(BRIGHTNESS_FACTOR)
+        mean_luma = ImageStat.Stat(rgb.convert("L")).mean[0]
+
         import io
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY)
+        rgb.save(buf, format="JPEG", quality=JPEG_QUALITY)
         jpeg_bytes = buf.getvalue()
 
         send_buf = self._build_chunks(jpeg_bytes)
@@ -224,7 +236,7 @@ class LyPanel:
         if ack_prefix != self._last_ack_prefix:
             log(f"LY frame ACK prefix changed: {ack_prefix}")
             self._last_ack_prefix = ack_prefix
-        log(f"Frame sent OK ({len(jpeg_bytes)} bytes JPEG, {len(send_buf)} bytes wire, {time.time() - t0:.2f}s)")
+        log(f"Frame sent OK ({len(jpeg_bytes)} bytes JPEG, {len(send_buf)} bytes wire, {time.time() - t0:.2f}s, luma={mean_luma:.1f}/255)")
 
 
 # --- Data sources (ported unchanged from ../LCD/server_lcd_stats.py) ---
