@@ -66,13 +66,36 @@ _QUIET_START_MIN = _parse_hhmm(QUIET_START)
 _QUIET_END_MIN = _parse_hhmm(QUIET_END)
 
 
-def current_brightness_factor():
+def in_quiet_hours():
     now_min = time.localtime().tm_hour * 60 + time.localtime().tm_min
     if _QUIET_START_MIN <= _QUIET_END_MIN:
-        in_quiet = _QUIET_START_MIN <= now_min < _QUIET_END_MIN
-    else:
-        in_quiet = now_min >= _QUIET_START_MIN or now_min < _QUIET_END_MIN
-    return QUIET_BRIGHTNESS_FACTOR if in_quiet else BRIGHTNESS_FACTOR
+        return _QUIET_START_MIN <= now_min < _QUIET_END_MIN
+    return now_min >= _QUIET_START_MIN or now_min < _QUIET_END_MIN
+
+
+# Phone-presence: also goes black whenever the phone hasn't answered a ping
+# for PHONE_AWAY_AFTER_MISSES consecutive checks - debounced so WiFi
+# power-save gaps while it's sitting on the charger at home don't flicker
+# the display. Comes back on the very next successful ping (no debounce
+# needed that direction - a false "home" only ever self-corrects a few
+# seconds later, whereas a false "away" would blank the screen on you).
+PHONE_IP = os.environ.get("LCD_PHONE_IP", "192.168.1.124")
+PHONE_CHECK_SECONDS = int(os.environ.get("LCD_PHONE_CHECK_SECONDS", "20"))
+PHONE_AWAY_AFTER_MISSES = int(os.environ.get("LCD_PHONE_AWAY_AFTER_MISSES", "5"))
+
+
+def fetch_phone_reachable():
+    try:
+        r = subprocess.run(
+            ["ping", "-c", "1", "-W", "2", PHONE_IP],
+            capture_output=True, text=True, timeout=4,
+        )
+        return r.returncode == 0
+    except Exception as e:
+        log(f"Failed to check phone presence: {e!r}")
+        return None
+
+
 WAN_CHECK_URL = os.environ.get(
     "LCD_WAN_CHECK_URL", "https://www.gstatic.com/generate_204"
 )
@@ -231,12 +254,12 @@ class LyPanel:
 
         return bytes(chunks)
 
-    def send_image(self, img: Image.Image):
+    def send_image(self, img: Image.Image, brightness_factor=None):
         if not self._handshaked:
             self._handshake()
 
         rgb = img.convert("RGB")
-        factor = current_brightness_factor()
+        factor = BRIGHTNESS_FACTOR if brightness_factor is None else brightness_factor
         if factor != 1.0:
             rgb = ImageEnhance.Brightness(rgb).enhance(factor)
         mean_luma = ImageStat.Stat(rgb.convert("L")).mean[0]
@@ -1012,6 +1035,9 @@ def main():
     last_seo_fetch_time = 0
     last_fear_greed_fetch_time = 0
     last_weather_fetch_time = 0
+    last_phone_check_time = 0
+    phone_miss_streak = 0
+    phone_home = True
 
     last_bml_today = None
     last_agents_online = None
@@ -1062,6 +1088,17 @@ def main():
                 state["tiktok_new"] = format_yt_subs(pending["tiktok_new"])
             if "tiktok_main" in pending:
                 state["tiktok_main"] = format_yt_subs(pending["tiktok_main"])
+            if "phone_present" in pending:
+                if pending["phone_present"]:
+                    phone_miss_streak = 0
+                    if not phone_home:
+                        log(f"Phone ({PHONE_IP}) back on the network - resuming normal brightness")
+                    phone_home = True
+                else:
+                    phone_miss_streak += 1
+                    if phone_miss_streak >= PHONE_AWAY_AFTER_MISSES and phone_home:
+                        phone_home = False
+                        log(f"Phone ({PHONE_IP}) hasn't answered in {phone_miss_streak} checks - treating as away, dimming to black")
             if "ping" in pending:
                 ms = pending["ping"]
                 state["ping"] = f"{ms:.0f}ms" if ms >= 0 else "Timeout"
@@ -1114,6 +1151,9 @@ def main():
             if now - last_ping_fetch_time >= PING_REFRESH_SECONDS or last_ping_fetch_time == 0:
                 last_ping_fetch_time = now
                 _schedule_fetch("ping", fetch_ping)
+            if now - last_phone_check_time >= PHONE_CHECK_SECONDS or last_phone_check_time == 0:
+                last_phone_check_time = now
+                _schedule_fetch("phone_present", fetch_phone_reachable)
             if now - last_adsense_fetch_time >= ADSENSE_REFRESH_SECONDS or last_adsense_fetch_time == 0:
                 last_adsense_fetch_time = now
                 _schedule_fetch("adsense", fetch_adsense_earnings)
@@ -1135,7 +1175,8 @@ def main():
             # expensive (JPEG encode + full 1920x480 push).
             if state != last_sent_state:
                 frame = render_frame(state)
-                panel.send_image(frame)
+                factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR
+                panel.send_image(frame, brightness_factor=factor)
                 last_sent_state = dict(state)
 
             time.sleep(SAMPLE_SECONDS)
