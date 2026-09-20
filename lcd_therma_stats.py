@@ -103,14 +103,23 @@ def fetch_phone_reachable():
 # Household "who's home" display (Crypto column) - same ping approach as the
 # brightness-triggering phone check above, but purely informational and on
 # its own, more relaxed schedule.
-MATT_PHONE_IP = os.environ.get("LCD_MATT_PHONE_IP", "192.168.1.230")
 JORDAN_PHONE_IP = os.environ.get("LCD_JORDAN_PHONE_IP", "192.168.1.14")
 HOUSEHOLD_CHECK_SECONDS = int(os.environ.get("LCD_HOUSEHOLD_CHECK_SECONDS", "30"))
 HOUSEHOLD_AWAY_AFTER_MISSES = int(os.environ.get("LCD_HOUSEHOLD_AWAY_AFTER_MISSES", "3"))
 
+# Matt's phone is on the guest network (192.168.52.x, a separate isolated
+# subnet), not the main LAN like everyone else's device here. It's meant to
+# land on .100 (a DHCP reservation) but currently still sits on .29 (its
+# pre-reservation address) until it does a full DHCP renegotiation rather
+# than a quick reconnect - so check both until it actually moves over.
+MATT_PHONE_IP = os.environ.get("LCD_MATT_PHONE_IP", "192.168.52.100")
+MATT_PHONE_IP_ALT = os.environ.get("LCD_MATT_PHONE_IP_ALT", "192.168.52.29")
+
 
 def fetch_matt_phone_reachable():
-    return fetch_ip_reachable(MATT_PHONE_IP)
+    if fetch_ip_reachable(MATT_PHONE_IP):
+        return True
+    return fetch_ip_reachable(MATT_PHONE_IP_ALT)
 
 
 def fetch_jordan_phone_reachable():
@@ -1079,10 +1088,10 @@ def main():
     phone_home = True
     last_matt_check_time = 0
     matt_miss_streak = 0
-    matt_home = True
+    matt_home = False
     last_jordan_check_time = 0
     jordan_miss_streak = 0
-    jordan_home = True
+    jordan_home = False
 
     last_bml_today = None
     last_agents_online = None
@@ -1147,19 +1156,25 @@ def main():
             if "matt_present" in pending:
                 if pending["matt_present"]:
                     matt_miss_streak = 0
+                    if not matt_home:
+                        log("Matt back on the network - showing Home")
                     matt_home = True
                 else:
                     matt_miss_streak += 1
-                    if matt_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES:
+                    if matt_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES and matt_home:
                         matt_home = False
+                        log(f"Matt hasn't answered in {matt_miss_streak} checks - showing Away")
             if "jordan_present" in pending:
                 if pending["jordan_present"]:
                     jordan_miss_streak = 0
+                    if not jordan_home:
+                        log("Jordan back on the network - showing Home")
                     jordan_home = True
                 else:
                     jordan_miss_streak += 1
-                    if jordan_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES:
+                    if jordan_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES and jordan_home:
                         jordan_home = False
+                        log(f"Jordan hasn't answered in {jordan_miss_streak} checks - showing Away")
             state["matt_status"] = "Home" if matt_home else "Away"
             state["jordan_status"] = "Home" if jordan_home else "Away"
             if "ping" in pending:
