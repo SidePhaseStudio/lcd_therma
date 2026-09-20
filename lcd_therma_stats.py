@@ -42,13 +42,37 @@ WIDTH = 1920
 HEIGHT = 480
 SAMPLE_SECONDS = float(os.environ.get("LCD_SAMPLE_SECONDS", "2.0"))
 JPEG_QUALITY = int(os.environ.get("LCD_JPEG_QUALITY", "85"))
-# Experiment: the panel reboots itself internally (Thermalright boot logo,
-# then our display comes back) with zero trace at the USB/kernel level ever
-# seen - consistent with the panel's own internal power regulation browning
-# out under peak backlight load rather than anything on the host side.
-# Dimming output slightly is a cheap, reversible test of that theory.
+# Dimming to 0.7x measurably fixed a panel-internal reboot issue (see git
+# history) - confirmed here as the normal/daytime brightness, and also cuts
+# real backlight power draw, which is why there's a separate near-black
+# "quiet hours" level below for whenever nobody's likely to be looking at it.
 # 1.0 = no change; <1.0 darkens.
 BRIGHTNESS_FACTOR = float(os.environ.get("LCD_BRIGHTNESS_FACTOR", "0.7"))
+
+# Quiet-hours schedule: goes fully black (still alive/updating, just no
+# visible content or real backlight draw) overnight, back to normal in the
+# morning. HH:MM 24h, wraps past midnight fine (23:59 -> 06:00).
+QUIET_BRIGHTNESS_FACTOR = float(os.environ.get("LCD_QUIET_BRIGHTNESS_FACTOR", "0.0"))
+QUIET_START = os.environ.get("LCD_QUIET_START", "23:59")
+QUIET_END = os.environ.get("LCD_QUIET_END", "06:00")
+
+
+def _parse_hhmm(s):
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+_QUIET_START_MIN = _parse_hhmm(QUIET_START)
+_QUIET_END_MIN = _parse_hhmm(QUIET_END)
+
+
+def current_brightness_factor():
+    now_min = time.localtime().tm_hour * 60 + time.localtime().tm_min
+    if _QUIET_START_MIN <= _QUIET_END_MIN:
+        in_quiet = _QUIET_START_MIN <= now_min < _QUIET_END_MIN
+    else:
+        in_quiet = now_min >= _QUIET_START_MIN or now_min < _QUIET_END_MIN
+    return QUIET_BRIGHTNESS_FACTOR if in_quiet else BRIGHTNESS_FACTOR
 WAN_CHECK_URL = os.environ.get(
     "LCD_WAN_CHECK_URL", "https://www.gstatic.com/generate_204"
 )
@@ -212,8 +236,9 @@ class LyPanel:
             self._handshake()
 
         rgb = img.convert("RGB")
-        if BRIGHTNESS_FACTOR != 1.0:
-            rgb = ImageEnhance.Brightness(rgb).enhance(BRIGHTNESS_FACTOR)
+        factor = current_brightness_factor()
+        if factor != 1.0:
+            rgb = ImageEnhance.Brightness(rgb).enhance(factor)
         mean_luma = ImageStat.Stat(rgb.convert("L")).mean[0]
 
         import io
