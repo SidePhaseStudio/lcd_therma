@@ -48,7 +48,7 @@ JPEG_QUALITY = int(os.environ.get("LCD_JPEG_QUALITY", "85"))
 # out under peak backlight load rather than anything on the host side.
 # Dimming output slightly is a cheap, reversible test of that theory.
 # 1.0 = no change; <1.0 darkens.
-BRIGHTNESS_FACTOR = float(os.environ.get("LCD_BRIGHTNESS_FACTOR", "0.85"))
+BRIGHTNESS_FACTOR = float(os.environ.get("LCD_BRIGHTNESS_FACTOR", "0.7"))
 WAN_CHECK_URL = os.environ.get(
     "LCD_WAN_CHECK_URL", "https://www.gstatic.com/generate_204"
 )
