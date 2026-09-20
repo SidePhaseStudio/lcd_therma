@@ -817,7 +817,7 @@ def load_font(paths, size):
 LABEL_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], 26)
 VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 42)
 SMALL_LABEL_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], 24)
-HERO_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 42)
+HERO_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 48)
 MEDIUM_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 30)
 
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -925,20 +925,22 @@ def render_frame(state):
     _stat(draw, img, x0, y, "LAN Mbps", state.get("lan", "--"))
     _stat(draw, img, x0 + right_off, y, "WAN Mbps", state.get("wan", "--"))
 
-    # Column 1: crypto — BTC/ETH (compacted a bit to make room), Fear &
-    # Greed, who's home, a separator, then weather for Playa del Ingles and
-    # Newton Aycliffe.
+    # Column 1: crypto — BTC/ETH with Fear & Greed's label/value stacked to
+    # their right (label alongside BTC, number alongside ETH underneath it -
+    # frees a whole row versus Fear & Greed having its own line), who's
+    # home, a separator, then weather for Playa del Ingles and Newton
+    # Aycliffe.
     x1 = COL_W + pad
-    hero_row_h = 80
-    small_row_h = 64
+    hero_row_h = 96
+    small_row_h = 70
     sep_gap = 14
-    y = (HEIGHT - (2 * hero_row_h + 4 * small_row_h + sep_gap)) // 2
+    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + sep_gap)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
+    draw.text((x1 + right_off, y), "Fear & Greed", font=LABEL_FONT, fill=LABEL_COLOR)
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
+    draw.text((x1 + right_off, y), state.get("fear_greed", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
     y += hero_row_h
-    _stat(draw, img, x1, y, "Fear & Greed", state.get("fear_greed", "--"), value_font=MEDIUM_VALUE_FONT)
-    y += small_row_h
     _stat(draw, img, x1, y, "Matt", state.get("matt_status", "--"), value_font=MEDIUM_VALUE_FONT)
     _stat(draw, img, x1 + right_off, y, "Jordan", state.get("jordan_status", "--"), value_font=MEDIUM_VALUE_FONT)
     y += small_row_h
