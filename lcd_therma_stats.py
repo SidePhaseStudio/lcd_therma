@@ -937,13 +937,17 @@ def render_frame(state):
     y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + 2 * sep_gap)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
     # Just the number, not "71 Greed" - the full text is as wide as BTC's
-    # own price+trend-arrow line, which extends well past where this column
-    # starts, so keeping the label's width meant the value could only sit
-    # far enough down to clear it (barely different from a full row below).
-    # The bare number is narrow enough to shift further right, clear of the
-    # arrow entirely, and sit right under the label instead.
-    draw.text((x1 + right_off, y), "Fear & Greed", font=LABEL_FONT, fill=LABEL_COLOR)
-    draw.text((x1 + right_off + 90, y + LABEL_FONT.size + 6), state.get("fear_greed_num", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
+    # own price+trend-arrow line, so it's narrow enough to sit clear of the
+    # arrow while still being centered under the label, which the full text
+    # wasn't narrow enough to do.
+    fg_label = "Fear & Greed"
+    fg_label_x = x1 + right_off
+    draw.text((fg_label_x, y), fg_label, font=LABEL_FONT, fill=LABEL_COLOR)
+    fg_num = state.get("fear_greed_num", "--")
+    fg_label_w = draw.textlength(fg_label, font=LABEL_FONT)
+    fg_num_w = draw.textlength(fg_num, font=VALUE_FONT)
+    fg_num_x = fg_label_x + (fg_label_w - fg_num_w) / 2
+    draw.text((fg_num_x, y + LABEL_FONT.size + 14), fg_num, font=VALUE_FONT, fill=VALUE_COLOR)
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
     y += hero_row_h
