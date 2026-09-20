@@ -84,16 +84,37 @@ PHONE_CHECK_SECONDS = int(os.environ.get("LCD_PHONE_CHECK_SECONDS", "20"))
 PHONE_AWAY_AFTER_MISSES = int(os.environ.get("LCD_PHONE_AWAY_AFTER_MISSES", "5"))
 
 
-def fetch_phone_reachable():
+def fetch_ip_reachable(ip):
     try:
         r = subprocess.run(
-            ["ping", "-c", "1", "-W", "2", PHONE_IP],
+            ["ping", "-c", "1", "-W", "2", ip],
             capture_output=True, text=True, timeout=4,
         )
         return r.returncode == 0
     except Exception as e:
-        log(f"Failed to check phone presence: {e!r}")
+        log(f"Failed to check presence for {ip}: {e!r}")
         return None
+
+
+def fetch_phone_reachable():
+    return fetch_ip_reachable(PHONE_IP)
+
+
+# Household "who's home" display (Crypto column) - same ping approach as the
+# brightness-triggering phone check above, but purely informational and on
+# its own, more relaxed schedule.
+MATT_PHONE_IP = os.environ.get("LCD_MATT_PHONE_IP", "192.168.1.230")
+JORDAN_PHONE_IP = os.environ.get("LCD_JORDAN_PHONE_IP", "192.168.1.14")
+HOUSEHOLD_CHECK_SECONDS = int(os.environ.get("LCD_HOUSEHOLD_CHECK_SECONDS", "30"))
+HOUSEHOLD_AWAY_AFTER_MISSES = int(os.environ.get("LCD_HOUSEHOLD_AWAY_AFTER_MISSES", "3"))
+
+
+def fetch_matt_phone_reachable():
+    return fetch_ip_reachable(MATT_PHONE_IP)
+
+
+def fetch_jordan_phone_reachable():
+    return fetch_ip_reachable(JORDAN_PHONE_IP)
 
 
 WAN_CHECK_URL = os.environ.get(
@@ -796,7 +817,7 @@ def load_font(paths, size):
 LABEL_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], 26)
 VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 42)
 SMALL_LABEL_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], 24)
-HERO_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 54)
+HERO_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 42)
 MEDIUM_VALUE_FONT = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], 30)
 
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -904,18 +925,22 @@ def render_frame(state):
     _stat(draw, img, x0, y, "LAN Mbps", state.get("lan", "--"))
     _stat(draw, img, x0 + right_off, y, "WAN Mbps", state.get("wan", "--"))
 
-    # Column 1: crypto — BTC/ETH up top, Fear & Greed index below, a
-    # separator, then weather for Playa del Ingles and Newton Aycliffe.
+    # Column 1: crypto — BTC/ETH (compacted a bit to make room), Fear &
+    # Greed, who's home, a separator, then weather for Playa del Ingles and
+    # Newton Aycliffe.
     x1 = COL_W + pad
-    hero_row_h = 100
-    small_row_h = 66
-    sep_gap = 16
-    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + sep_gap)) // 2
+    hero_row_h = 80
+    small_row_h = 64
+    sep_gap = 14
+    y = (HEIGHT - (2 * hero_row_h + 4 * small_row_h + sep_gap)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
     y += hero_row_h
     _stat(draw, img, x1, y, "Fear & Greed", state.get("fear_greed", "--"), value_font=MEDIUM_VALUE_FONT)
+    y += small_row_h
+    _stat(draw, img, x1, y, "Matt", state.get("matt_status", "--"), value_font=MEDIUM_VALUE_FONT)
+    _stat(draw, img, x1 + right_off, y, "Jordan", state.get("jordan_status", "--"), value_font=MEDIUM_VALUE_FONT)
     y += small_row_h
     draw.line([(x1, y + sep_gap // 2), (2 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
     y += sep_gap
@@ -1038,6 +1063,12 @@ def main():
     last_phone_check_time = 0
     phone_miss_streak = 0
     phone_home = True
+    last_matt_check_time = 0
+    matt_miss_streak = 0
+    matt_home = True
+    last_jordan_check_time = 0
+    jordan_miss_streak = 0
+    jordan_home = True
 
     last_bml_today = None
     last_agents_online = None
@@ -1099,6 +1130,24 @@ def main():
                     if phone_miss_streak >= PHONE_AWAY_AFTER_MISSES and phone_home:
                         phone_home = False
                         log(f"Phone ({PHONE_IP}) hasn't answered in {phone_miss_streak} checks - treating as away, dimming to black")
+            if "matt_present" in pending:
+                if pending["matt_present"]:
+                    matt_miss_streak = 0
+                    matt_home = True
+                else:
+                    matt_miss_streak += 1
+                    if matt_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES:
+                        matt_home = False
+            if "jordan_present" in pending:
+                if pending["jordan_present"]:
+                    jordan_miss_streak = 0
+                    jordan_home = True
+                else:
+                    jordan_miss_streak += 1
+                    if jordan_miss_streak >= HOUSEHOLD_AWAY_AFTER_MISSES:
+                        jordan_home = False
+            state["matt_status"] = "Home" if matt_home else "Away"
+            state["jordan_status"] = "Home" if jordan_home else "Away"
             if "ping" in pending:
                 ms = pending["ping"]
                 state["ping"] = f"{ms:.0f}ms" if ms >= 0 else "Timeout"
@@ -1154,6 +1203,12 @@ def main():
             if now - last_phone_check_time >= PHONE_CHECK_SECONDS or last_phone_check_time == 0:
                 last_phone_check_time = now
                 _schedule_fetch("phone_present", fetch_phone_reachable)
+            if now - last_matt_check_time >= HOUSEHOLD_CHECK_SECONDS or last_matt_check_time == 0:
+                last_matt_check_time = now
+                _schedule_fetch("matt_present", fetch_matt_phone_reachable)
+            if now - last_jordan_check_time >= HOUSEHOLD_CHECK_SECONDS or last_jordan_check_time == 0:
+                last_jordan_check_time = now
+                _schedule_fetch("jordan_present", fetch_jordan_phone_reachable)
             if now - last_adsense_fetch_time >= ADSENSE_REFRESH_SECONDS or last_adsense_fetch_time == 0:
                 last_adsense_fetch_time = now
                 _schedule_fetch("adsense", fetch_adsense_earnings)
