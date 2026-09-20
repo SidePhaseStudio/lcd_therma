@@ -39,7 +39,16 @@ EP_OUT = 0x09
 EP_IN = 0x81
 
 WIDTH = 1920
-HEIGHT = 480
+# The panel is marketed/branded as 1920x480, but the vendor's own Windows
+# software (decompiled by the thermalright-trcc-linux project) actually
+# encodes and sends 1920x462 for this exact PM byte (65 = Trofeo Vision
+# 9.16, confirmed via our own handshake: PM=64+resp[20]=65). We had been
+# sending 18 rows taller than the panel's firmware expects this whole
+# time - a real, previously-missed protocol mismatch, and a very plausible
+# candidate for the still-unexplained internal reboot (an oversized JPEG
+# would mostly get silently tolerated/cropped, but could plausibly overflow
+# an internal buffer on frames where the exact byte layout lands badly).
+HEIGHT = 462
 SAMPLE_SECONDS = float(os.environ.get("LCD_SAMPLE_SECONDS", "2.0"))
 JPEG_QUALITY = int(os.environ.get("LCD_JPEG_QUALITY", "85"))
 # Dimming to 0.7x measurably fixed a panel-internal reboot issue (see git
@@ -1257,7 +1266,7 @@ def main():
 
             # Full-frame-only protocol: only bother re-encoding/sending when
             # something actually changed, since every send is comparatively
-            # expensive (JPEG encode + full 1920x480 push).
+            # expensive (JPEG encode + full 1920x462 push).
             if state != last_sent_state:
                 frame = render_frame(state)
                 factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR

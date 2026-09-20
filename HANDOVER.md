@@ -1,5 +1,14 @@
 # lcd_therma — Handover
 
+> **2026-09-20 correction**: this document (and the original build) assumed
+> the panel's wire resolution was 1920x480, taken from the product's own
+> marketed spec. It's actually **1920x462** — the vendor's real firmware
+> (decompiled by the `thermalright-trcc-linux` project) expects 18 rows less
+> than the box says. See the README's "Panel / Protocol" section for the
+> full story; `lcd_therma_stats.py` now uses the corrected `HEIGHT = 462`.
+> Left the rest of this file as originally written below, since it's meant
+> to capture that session's context as it actually happened.
+
 New project for a Thermalright Trofeo Vision 9.16" USB LCD panel, spun off from
 the `LCD` project (`/home/craig/projects/LCD`) which drives Craig's original
 3.5" panel. This is intended to become his **permanent** display. Read this
