@@ -77,6 +77,7 @@ class LyPanel:
         self.timeout_ms = timeout_ms
         self.dev = None
         self._handshaked = False
+        self._last_ack_prefix = None
 
     def open(self):
         dev = usb.core.find(idVendor=VID, idProduct=PID)
@@ -117,6 +118,7 @@ class LyPanel:
             except usb.core.USBError:
                 pass
             self.dev = None
+            self._last_ack_prefix = None
 
     def hard_reset(self):
         """Issue a USBDEVFS_RESET on the port - the same recovery a physical
@@ -158,7 +160,14 @@ class LyPanel:
                 f"[8]={resp[8] if len(resp) > 8 else None})"
             )
         else:
-            log("LY handshake OK")
+            # [20]/[22] are the panel's PM/SUB identity bytes in the reference
+            # implementation (thermalright-trcc-linux) - some panel variants
+            # use these to pick an image rotation. We've never logged them
+            # before, so we don't actually know if this unit's values are
+            # stable across reopens - logging them to find out.
+            pm = resp[20] if len(resp) > 20 else None
+            sub = resp[22] if len(resp) > 22 else None
+            log(f"LY handshake OK (PM={pm}, SUB={sub})")
         self._handshaked = True
 
     def _build_chunks(self, payload: bytes) -> bytes:
@@ -204,9 +213,17 @@ class LyPanel:
         t0 = time.time()
         for i in range(0, len(send_buf), _USB_WRITE_SIZE):
             self.dev.write(EP_OUT, send_buf[i:i + _USB_WRITE_SIZE], timeout=self.timeout_ms)
-        resp = self.dev.read(EP_IN, _ACK_SIZE, timeout=self.timeout_ms)
+        resp = bytes(self.dev.read(EP_IN, _ACK_SIZE, timeout=self.timeout_ms))
         if len(resp) != _ACK_SIZE:
             log(f"LY frame ACK unexpected length: {len(resp)} (expected {_ACK_SIZE})")
+        # We only ever checked the ACK's length, never its content - log the
+        # first 16 bytes whenever they change from the last frame's ACK, so
+        # a one-off anomaly right before a glitch would actually show up
+        # instead of being silently discarded like every ACK before it.
+        ack_prefix = resp[:16].hex()
+        if ack_prefix != self._last_ack_prefix:
+            log(f"LY frame ACK prefix changed: {ack_prefix}")
+            self._last_ack_prefix = ack_prefix
         log(f"Frame sent OK ({len(jpeg_bytes)} bytes JPEG, {len(send_buf)} bytes wire, {time.time() - t0:.2f}s)")
 
 
