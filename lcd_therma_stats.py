@@ -79,7 +79,7 @@ def in_quiet_hours():
 # the display. Comes back on the very next successful ping (no debounce
 # needed that direction - a false "home" only ever self-corrects a few
 # seconds later, whereas a false "away" would blank the screen on you).
-PHONE_IP = os.environ.get("LCD_PHONE_IP", "192.168.1.124")
+PHONE_IP = os.environ.get("LCD_PHONE_IP", "192.168.1.12")
 PHONE_CHECK_SECONDS = int(os.environ.get("LCD_PHONE_CHECK_SECONDS", "20"))
 PHONE_AWAY_AFTER_MISSES = int(os.environ.get("LCD_PHONE_AWAY_AFTER_MISSES", "5"))
 
