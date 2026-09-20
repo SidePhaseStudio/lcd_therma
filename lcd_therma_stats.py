@@ -934,13 +934,18 @@ def render_frame(state):
     hero_row_h = 96
     small_row_h = 70
     sep_gap = 14
-    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + sep_gap)) // 2
+    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + 2 * sep_gap)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
+    # Fear & Greed's value sits closer under its label than a full row down
+    # (was aligned with ETH's row) - but still clear of BTC's own price/
+    # trend-arrow line just above it, which runs wider than the label alone.
     draw.text((x1 + right_off, y), "Fear & Greed", font=LABEL_FONT, fill=LABEL_COLOR)
+    draw.text((x1 + right_off, y + LABEL_FONT.size + 6 + HERO_VALUE_FONT.size), state.get("fear_greed", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
-    draw.text((x1 + right_off, y), state.get("fear_greed", "--"), font=MEDIUM_VALUE_FONT, fill=VALUE_COLOR)
     y += hero_row_h
+    draw.line([(x1, y + sep_gap // 2), (2 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
+    y += sep_gap
     _stat(draw, img, x1, y, "Matt", state.get("matt_status", "--"), value_font=MEDIUM_VALUE_FONT)
     _stat(draw, img, x1 + right_off, y, "Jordan", state.get("jordan_status", "--"), value_font=MEDIUM_VALUE_FONT)
     y += small_row_h
