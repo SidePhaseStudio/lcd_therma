@@ -23,6 +23,17 @@ Four columns across the full 1920x480 canvas, each column's rows vertically cent
 
 Background is a subtle diagonal gradient with a soft corner vignette, built once and cached rather than recomputed per frame.
 
+## Brightness / Power Saving
+
+Rendered frames are dimmed to `LCD_BRIGHTNESS_FACTOR` (default `0.7`) before encoding - this also fixed a panel-internal reboot issue (Thermalright boot logo replaying with zero trace at the USB/kernel level), which appears to be caused by peak backlight draw browning out the panel's own power regulation at full brightness.
+
+On top of that, the display drops to `LCD_QUIET_BRIGHTNESS_FACTOR` (default `0.0`, fully black) whenever **either**:
+
+- It's within the quiet-hours window - `LCD_QUIET_START` to `LCD_QUIET_END` (default `23:59`-`06:00`, wraps past midnight), or
+- The phone at `LCD_PHONE_IP` (default `192.168.1.124`) hasn't answered a ping in `LCD_PHONE_AWAY_AFTER_MISSES` consecutive checks (default 5, checked every `LCD_PHONE_CHECK_SECONDS` = 20s, so ~100s) - debounced that direction only, so a WiFi power-save gap doesn't blank the screen; coming back home isn't debounced, a single successful ping restores normal brightness immediately.
+
+The service keeps running and updating throughout either condition - it's rendering black content, not stopped - so it recovers instantly with no restart needed.
+
 ## Project Files
 
 - `lcd_therma_stats.py` - main display renderer, USB transport (`LyPanel`), and data fetchers
