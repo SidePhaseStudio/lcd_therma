@@ -49,7 +49,22 @@ WIDTH = 1920
 # would mostly get silently tolerated/cropped, but could plausibly overflow
 # an internal buffer on frames where the exact byte layout lands badly).
 HEIGHT = 462
-SAMPLE_SECONDS = float(os.environ.get("LCD_SAMPLE_SECONDS", "2.0"))
+# Was 2.0 - right at the edge of the firmware's ~2-3s keepalive window with
+# zero margin for the per-tick encode/USB-write time on top (see
+# KEEPALIVE_SECONDS below). 1.0 leaves real headroom; cheap on real sends
+# too since a skipped-content tick now resends cached bytes, not a fresh
+# JPEG encode.
+SAMPLE_SECONDS = float(os.environ.get("LCD_SAMPLE_SECONDS", "1.0"))
+# thermalright-trcc-linux's own docs for this exact device family (Bulk/LY,
+# which lists our 0416:5408) confirm: "Bulk/LY firmware reverts to the
+# built-in logo after ~2-3 s without a frame". Our change-detection guard
+# (skip the send when nothing on screen changed) could leave a multi-tick
+# gap whenever nothing changed, and even a single SAMPLE_SECONDS=2.0 tick is
+# right at that threshold with zero margin for encode/USB jitter - both very
+# plausible causes of the still-unexplained boot-logo flash. This is their
+# same fix: a cheap resend of the last already-encoded frame (see
+# LyPanel.resend_last) whenever the loop would otherwise skip sending.
+KEEPALIVE_SECONDS = float(os.environ.get("LCD_KEEPALIVE_SECONDS", "1.0"))
 JPEG_QUALITY = int(os.environ.get("LCD_JPEG_QUALITY", "85"))
 # Dimming to 0.7x measurably fixed a panel-internal reboot issue (see git
 # history) - confirmed here as the normal/daytime brightness, and also cuts
@@ -171,6 +186,7 @@ class LyPanel:
         self.dev = None
         self._handshaked = False
         self._last_ack_prefix = None
+        self._last_send_buf = None
 
     def open(self):
         dev = usb.core.find(idVendor=VID, idProduct=PID)
@@ -309,6 +325,7 @@ class LyPanel:
         jpeg_bytes = buf.getvalue()
 
         send_buf = self._build_chunks(jpeg_bytes)
+        self._last_send_buf = send_buf
         t0 = time.time()
         for i in range(0, len(send_buf), _USB_WRITE_SIZE):
             self.dev.write(EP_OUT, send_buf[i:i + _USB_WRITE_SIZE], timeout=self.timeout_ms)
@@ -324,6 +341,27 @@ class LyPanel:
             log(f"LY frame ACK prefix changed: {ack_prefix}")
             self._last_ack_prefix = ack_prefix
         log(f"Frame sent OK ({len(jpeg_bytes)} bytes JPEG, {len(send_buf)} bytes wire, {time.time() - t0:.2f}s, luma={mean_luma:.1f}/255)")
+
+    def resend_last(self):
+        """Rewrite the previously-sent frame's already-encoded wire bytes,
+        skipping JPEG re-encoding entirely - a cheap keepalive for ticks
+        where on-screen content didn't change, so the panel never goes more
+        than SAMPLE_SECONDS without a frame (see KEEPALIVE_SECONDS above)."""
+        if self._last_send_buf is None:
+            return
+        if not self._handshaked:
+            self._handshake()
+        t0 = time.time()
+        for i in range(0, len(self._last_send_buf), _USB_WRITE_SIZE):
+            self.dev.write(EP_OUT, self._last_send_buf[i:i + _USB_WRITE_SIZE], timeout=self.timeout_ms)
+        resp = bytes(self.dev.read(EP_IN, _ACK_SIZE, timeout=self.timeout_ms))
+        if len(resp) != _ACK_SIZE:
+            log(f"LY frame ACK unexpected length: {len(resp)} (expected {_ACK_SIZE})")
+        ack_prefix = resp[:16].hex()
+        if ack_prefix != self._last_ack_prefix:
+            log(f"LY frame ACK prefix changed: {ack_prefix}")
+            self._last_ack_prefix = ack_prefix
+        log(f"Keepalive resent OK ({len(self._last_send_buf)} bytes wire, {time.time() - t0:.2f}s)")
 
 
 # --- Data sources (ported unchanged from ../LCD/server_lcd_stats.py) ---
@@ -1108,6 +1146,7 @@ def main():
     last_eth_price = None
 
     last_sent_state = None
+    last_send_time = 0
     consecutive_reopen_failures = 0
 
     while True:
@@ -1264,14 +1303,22 @@ def main():
             values, prev_net, prev_time = sample_metrics(prev_net, prev_time)
             state.update(values)
 
-            # Full-frame-only protocol: only bother re-encoding/sending when
-            # something actually changed, since every send is comparatively
-            # expensive (JPEG encode + full 1920x462 push).
+            # Full-frame-only protocol: only bother re-encoding when
+            # something actually changed, since a full re-render + JPEG
+            # encode is comparatively expensive. But the panel's own Bulk/LY
+            # firmware reverts to its boot logo after ~2-3s without *any*
+            # frame, so on ticks where nothing changed, cheaply resend the
+            # last already-encoded frame instead of skipping the send
+            # outright - see KEEPALIVE_SECONDS above.
             if state != last_sent_state:
                 frame = render_frame(state)
                 factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR
                 panel.send_image(frame, brightness_factor=factor)
                 last_sent_state = dict(state)
+                last_send_time = now
+            elif now - last_send_time >= KEEPALIVE_SECONDS:
+                panel.resend_last()
+                last_send_time = now
 
             time.sleep(SAMPLE_SECONDS)
 
