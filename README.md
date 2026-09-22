@@ -18,7 +18,7 @@ Spun off from the sibling [`LCD`](../LCD) project, which drives Craig's original
 Four columns across the full 1920x462 canvas (the actual wire resolution — see Panel / Protocol above), each column's rows vertically centered to use the whole height rather than clustering at the top:
 
 - **System**: CPU/Load, SWAP/MEM, TEMP/DISK, Ping (8.8.8.8)/Uptime, LAN/WAN throughput
-- **Crypto**: BTC/ETH (GBP, with green/red trend arrows on price moves) with the Crypto Fear & Greed Index number centered under its own label beside them, who's home (Matt/Jordan — see "Household Presence" below), a separator, then weather for Playa del Ingles and Newton Aycliffe
+- **Crypto**: BTC/ETH (GBP, with green/red trend arrows on price moves) with the Crypto Fear & Greed Index number centered under its own label beside them, who's home (see "Household Presence" below), a separator, then weather for Playa del Ingles and Newton Aycliffe
 - **BeatMyLanding**: total users/online/currently flying, new users/landings today, latest traffic event, Search Console clicks/impressions (7d)
 - **Social**: Discord online/members, YouTube subscribers/total views, TikTok new/old account followers, AdSense earnings (today/yesterday)
 
@@ -35,16 +35,15 @@ On top of that, the display drops to `LCD_QUIET_BRIGHTNESS_FACTOR` (default `0.0
 
 The service keeps running and updating throughout either condition - it's rendering black content, not stopped - so it recovers instantly with no restart needed.
 
-## Household Presence (Matt/Jordan)
+## Household Presence
 
-The crypto column shows Home/Away for two more phones, purely informational (doesn't affect brightness like the check above does):
+The crypto column shows Home/Away for two people's phones, purely informational (doesn't affect brightness like the check above does). Both people's names and IPs are configured entirely via `.env` (`LCD_PERSON1_NAME`/`LCD_PERSON1_IP`/`LCD_PERSON1_IP_ALT` and `LCD_PERSON2_NAME`/`LCD_PERSON2_IP` — see `.env.example`), not hardcoded or committed to this repo. Leaving a person's IP blank disables their check (shows `--`).
 
-- **Jordan** (`LCD_JORDAN_PHONE_IP`, default `192.168.1.14`) - plain main-LAN device, checked with a normal ping.
-- **Matt** (`LCD_MATT_PHONE_IP`/`LCD_MATT_PHONE_IP_ALT`, default `192.168.52.100`/`192.168.52.29`) - lives on the router's isolated "Lodger" guest network (a separate subnet, its own DHCP scope), not the main LAN. Two IPs are checked because the DHCP reservation for his phone was pointing it at `.100` but it hadn't yet done a full DHCP renegotiation to pick that up, so it can currently answer on either.
+`PERSON1_IP_ALT` exists for a device that lives on a separate isolated guest/SDN subnet rather than the main LAN, and may answer on either address until it fully renegotiates onto its DHCP reservation — both IPs are checked, first the primary then the alt.
 
-**Both default to Away, not Home, until an actual successful check proves otherwise** - and that flip happens fast (a single successful ping, no debounce), while going the other way to Away requires `LCD_HOUSEHOLD_AWAY_AFTER_MISSES` consecutive misses (default 3, checked every `LCD_HOUSEHOLD_CHECK_SECONDS` = 30s, so ~90s). Defaulting to Away means a restart briefly shows Away for someone who's actually home (self-corrects in a couple of seconds) rather than falsely showing Home for up to 90s for someone who isn't - the opposite default previously made an already-away Jordan look like a bug every time the service restarted for an unrelated reason.
+**Both default to Away, not Home, until an actual successful check proves otherwise** - and that flip happens fast (a single successful ping, no debounce), while going the other way to Away requires `LCD_HOUSEHOLD_AWAY_AFTER_MISSES` consecutive misses (default 3, checked every `LCD_HOUSEHOLD_CHECK_SECONDS` = 30s, so ~90s). Defaulting to Away means a restart briefly shows Away for someone who's actually home (self-corrects in a couple of seconds) rather than falsely showing Home for up to 90s for someone who isn't.
 
-**Guest network isolation gotcha**: by design, devices on the main LAN (where this box lives) cannot ping devices on an isolated guest/SDN subnet - the router's own guest-isolation firewall chain (`SDN_IA` on this ASUS/Merlin router, a blanket `DROP` between any two bridge interfaces) blocks it, and no amount of picking a different target IP fixes that. Getting Matt's presence check working required a narrow router-side exception: a persistent script at `/jffs/scripts/firewall-start` on the router (needs "Enable JFFS custom scripts and configs" turned on in the router's admin UI) that inserts an ICMP-only `ACCEPT` rule scoped to just this LCD box's IP and Matt's two possible guest IPs, ahead of the isolation `DROP` rule. That script lives on the router, not in this repo - if Matt's presence check ever stops working after a router factory reset or migration to different hardware, that's the first thing to recreate.
+**Guest network isolation gotcha**: by design, devices on the main LAN (where this box lives) cannot ping devices on an isolated guest/SDN subnet - the router's own guest-isolation firewall chain (`SDN_IA` on this ASUS/Merlin router, a blanket `DROP` between any two bridge interfaces) blocks it, and no amount of picking a different target IP fixes that. Getting a guest-network presence check working required a narrow router-side exception: a persistent script at `/jffs/scripts/firewall-start` on the router (needs "Enable JFFS custom scripts and configs" turned on in the router's admin UI) that inserts an ICMP-only `ACCEPT` rule scoped to just this LCD box's IP and the guest-network phone's two possible IPs, ahead of the isolation `DROP` rule. That script lives on the router, not in this repo - if that presence check ever stops working after a router factory reset or migration to different hardware, that's the first thing to recreate.
 
 ## Project Files
 
