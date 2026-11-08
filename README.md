@@ -18,13 +18,42 @@ Spun off from the sibling [`LCD`](../LCD) project, which drives Craig's original
 Four columns across the full 1920x462 canvas (the actual wire resolution — see Panel / Protocol above), each column's rows vertically centered to use the whole height rather than clustering at the top:
 
 - **System**: CPU/Load, SWAP/MEM, TEMP/DISK, Ping (8.8.8.8)/Uptime, LAN/WAN throughput
+- **VPS**: SidePhaseStudio VPS CPU/load, swap/memory, temperature/disk, TCP latency/uptime, RX/TX throughput
 - **Crypto**: BTC/ETH (GBP, with green/red trend arrows on price moves) with the Crypto Fear & Greed Index number centered under its own label beside them, who's home (see "Household Presence" below), a separator, then weather for Playa del Ingles and Newton Aycliffe
-- **BeatMyLanding**: total users/online/currently flying, new users/landings today, latest traffic event, Search Console clicks/impressions (7d)
 - **Social**: Discord online/members, YouTube subscribers/total views, TikTok new/old account followers, AdSense earnings (today/yesterday)
 
 Background is a subtle diagonal gradient with a soft corner vignette, built once and cached rather than recomputed per frame.
 
+VPS stats refresh every five seconds over the saved `uk.sidephasestudio.com`
+SSH connection as `craig`. The local `vps_metrics.py` sampler is piped to the
+remote Python interpreter; nothing is installed or written on the VPS.
+CPU and network rates use a one-second sample on the default-route interface.
+Temperature is `--` when no sensor is exposed. `TCP 8.8.8.8` measures connection
+latency to port 443, since this VPS has no ICMP ping utility. Failed SSH samples
+are logged and the last successful readings remain displayed.
+
 ## Brightness / Power Saving
+
+The second panel (`2025E7B071A9`) uses the same background with three columns.
+The first shows Global Vectors registered drivers, approved
+drivers, and drivers awaiting access (`not_approved`). The middle column shows
+BeatMyLanding total users/online/flying, new users/landings today, latest
+traffic and Search Console clicks/impressions using the existing live feeds.
+The third column is empty. Below the driver counts, the first column shows server players,
+CPU, memory (MB), incoming/outgoing traffic (kbps), and worst loss from
+`POST https://globalvectors.app/api/admin/server-totals`; partial results are
+marked in the column header. Counts refresh every 15 seconds from the server-totals
+and `POST https://globalvectors.app/api/admin/driver-counts` endpoints; both use
+`GLOBAL_VECTORS_ADMIN_TOKEN` from the local `.env` in the JSON `token` field.
+Failed requests retain the last successful values, or show `--` before the
+first successful fetch. Never commit the token.
+
+The second panel stays at 0.5 image brightness and is rotated 180 degrees.
+The current installation also sets `LCD_BRIGHTNESS_FACTOR=0.5` in its private
+`.env` for the original panel; credentials and local settings remain untracked.
+Its background alone is darkened a further 40%; text and divider colours stay unchanged.
+Both panels use the existing service, quiet-hours rules, and serial-number
+selection; the original (`2025E770099A`) retains its four-column stats layout.
 
 Rendered frames are dimmed to `LCD_BRIGHTNESS_FACTOR` (default `0.7`) before encoding - this also fixed a panel-internal reboot issue (Thermalright boot logo replaying with zero trace at the USB/kernel level), which appears to be caused by peak backlight draw browning out the panel's own power regulation at full brightness.
 
@@ -39,7 +68,7 @@ The service keeps running and updating throughout either condition - it's render
 
 The crypto column shows Home/Away for two people's phones, purely informational (doesn't affect brightness like the check above does). Both people's names and IPs are configured entirely via `.env` (`LCD_PERSON1_NAME`/`LCD_PERSON1_IP`/`LCD_PERSON1_IP_ALT` and `LCD_PERSON2_NAME`/`LCD_PERSON2_IP` — see `.env.example`), not hardcoded or committed to this repo. Leaving a person's IP blank disables their check (shows `--`).
 
-`PERSON1_IP_ALT` exists for a device that lives on a separate isolated guest/SDN subnet rather than the main LAN, and may answer on either address until it fully renegotiates onto its DHCP reservation — both IPs are checked, first the primary then the alt.
+`LCD_PERSON1_IP_ALT` can track a second phone. Both addresses are checked each time; either responding means Home. `LCD_PERSON1_DEVICE` and `LCD_PERSON1_DEVICE_ALT` name the phones in smaller text beneath the status, showing only the phones that responded to the latest check. The Home/Away status still uses the miss debounce below.
 
 **Both default to Away, not Home, until an actual successful check proves otherwise** - and that flip happens fast (a single successful ping, no debounce), while going the other way to Away requires `LCD_HOUSEHOLD_AWAY_AFTER_MISSES` consecutive misses (default 3, checked every `LCD_HOUSEHOLD_CHECK_SECONDS` = 30s, so ~90s). Defaulting to Away means a restart briefly shows Away for someone who's actually home (self-corrects in a couple of seconds) rather than falsely showing Home for up to 90s for someone who isn't.
 

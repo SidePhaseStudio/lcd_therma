@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import math
 import os
 import re
 import struct
@@ -134,10 +135,10 @@ HOUSEHOLD_AWAY_AFTER_MISSES = int(os.environ.get("LCD_HOUSEHOLD_AWAY_AFTER_MISSE
 
 PERSON1_NAME = os.environ.get("LCD_PERSON1_NAME", "Person 1")
 PERSON1_IP = os.environ.get("LCD_PERSON1_IP", "")
-# Optional second IP for a person whose device lives on an isolated
-# guest/SDN subnet rather than the main LAN, and may answer on either
-# address until it fully renegotiates onto its DHCP reservation.
+# Optional second phone; either responding marks this person as Home.
 PERSON1_IP_ALT = os.environ.get("LCD_PERSON1_IP_ALT", "")
+PERSON1_DEVICE = os.environ.get("LCD_PERSON1_DEVICE", "Phone 1")
+PERSON1_DEVICE_ALT = os.environ.get("LCD_PERSON1_DEVICE_ALT", "Phone 2")
 
 PERSON2_NAME = os.environ.get("LCD_PERSON2_NAME", "Person 2")
 PERSON2_IP = os.environ.get("LCD_PERSON2_IP", "")
@@ -146,9 +147,10 @@ PERSON2_IP = os.environ.get("LCD_PERSON2_IP", "")
 def fetch_person1_reachable():
     if not PERSON1_IP:
         return None
-    if fetch_ip_reachable(PERSON1_IP):
-        return True
-    return fetch_ip_reachable(PERSON1_IP_ALT) if PERSON1_IP_ALT else False
+    return " + ".join(
+        name for ip, name in ((PERSON1_IP, PERSON1_DEVICE), (PERSON1_IP_ALT, PERSON1_DEVICE_ALT))
+        if ip and fetch_ip_reachable(ip)
+    )
 
 
 def fetch_person2_reachable():
@@ -188,15 +190,16 @@ class LyPanel:
     """Minimal LY-transport driver for the 0416:5408 panel. Sends a full JPEG
     frame per update; there is no way to redraw just part of the screen."""
 
-    def __init__(self, timeout_ms=5000):
+    def __init__(self, timeout_ms=5000, serial_number="2025E770099A"):
         self.timeout_ms = timeout_ms
+        self.serial_number = serial_number
         self.dev = None
         self._handshaked = False
         self._last_ack_prefix = None
         self._last_send_buf = None
 
     def open(self):
-        dev = usb.core.find(idVendor=VID, idProduct=PID)
+        dev = usb.core.find(idVendor=VID, idProduct=PID, serial_number=self.serial_number)
         if dev is None:
             raise RuntimeError(f"Panel {VID:04x}:{PID:04x} not found")
         try:
@@ -241,7 +244,7 @@ class LyPanel:
         unplug/replug gives you. For when the panel is wedged rather than
         just momentarily gone; a plain close()+open() can't fix that case."""
         self.close()
-        dev = usb.core.find(idVendor=VID, idProduct=PID)
+        dev = usb.core.find(idVendor=VID, idProduct=PID, serial_number=self.serial_number)
         if dev is None:
             raise RuntimeError(f"Panel {VID:04x}:{PID:04x} not found for reset")
         dev.reset()
@@ -717,6 +720,51 @@ def fetch_latest_traffic_event():
         return None
 
 
+def fetch_global_vectors_drivers():
+    token = os.environ.get("GLOBAL_VECTORS_ADMIN_TOKEN", "")
+    if not token:
+        return None
+    try:
+        response = requests.post(
+            "https://globalvectors.app/api/admin/driver-counts",
+            json={"token": token}, timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        counts = {key: data.get(key) for key in ("registered", "approved", "not_approved")}
+        if data.get("ok") is not True or any(type(value) is not int or value < 0 for value in counts.values()):
+            raise ValueError("Invalid Global Vectors driver counts")
+        return counts
+    except Exception as e:
+        log(f"Failed to fetch Global Vectors drivers: {e!r}")
+        return None
+
+
+def fetch_global_vectors_server_totals():
+    token = os.environ.get("GLOBAL_VECTORS_ADMIN_TOKEN", "")
+    if not token:
+        return None
+    try:
+        response = requests.post(
+            "https://globalvectors.app/api/admin/server-totals",
+            json={"token": token}, timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        totals = {key: data.get(key) for key in (
+            "players", "in_kbps", "out_kbps", "cpu", "mem_mb", "worst_loss",
+        )}
+        if (data.get("ok") is not True or type(data.get("partial")) is not bool
+                or type(totals["players"]) is not int
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                       for value in totals.values())):
+            raise ValueError("Invalid Global Vectors server totals")
+        return {**totals, "partial": data["partial"]}
+    except Exception as e:
+        log(f"Failed to fetch Global Vectors server totals: {e!r}")
+        return None
+
+
 def fetch_agents_online():
     try:
         r = requests.get(AGENTS_ONLINE_URL, timeout=10)
@@ -863,6 +911,24 @@ def sample_metrics(prev_net, prev_time):
     return values, net, now
 
 
+def fetch_vps_metrics():
+    try:
+        with open(os.path.join(ASSET_DIR, "vps_metrics.py"), encoding="utf-8") as source:
+            result = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                 "uk.sidephasestudio.com", "python3", "-"],
+                input=source.read(), capture_output=True, text=True, timeout=8, check=True,
+            )
+        metrics = json.loads(result.stdout)
+        keys = ("cpu", "load", "mem", "swap", "disk", "temp", "uptime", "ping", "rx", "tx")
+        if not isinstance(metrics, dict) or any(not isinstance(metrics.get(key), str) for key in keys):
+            raise ValueError("Invalid VPS metrics")
+        return {key: metrics[key] for key in keys}
+    except Exception as e:
+        log(f"Failed to fetch VPS metrics: {e!r}")
+        return None
+
+
 # --- Rendering ---
 # Same stats, groupings, and label-above-value convention as the LCD
 # project's 320x480 layout, laid out across four columns and spread to fill
@@ -973,7 +1039,7 @@ def render_frame(state):
     x0 = pad
     row_h = 88
     y = (HEIGHT - 5 * row_h) // 2
-    _stat(draw, img, x0, y, "CPU", state.get("cpu", "--"))
+    _stat(draw, img, x0, y, "Lenovo CPU", state.get("cpu", "--"))
     _stat(draw, img, x0 + right_off, y, "Load", state.get("load", "--"))
     y += row_h
     _stat(draw, img, x0, y, "SWAP", state.get("swap", "--"))
@@ -988,16 +1054,30 @@ def render_frame(state):
     _stat(draw, img, x0, y, "LAN Mbps", state.get("lan", "--"))
     _stat(draw, img, x0 + right_off, y, "WAN Mbps", state.get("wan", "--"))
 
-    # Column 1: crypto — BTC/ETH with Fear & Greed's label/value stacked to
+    vps = state.get("vps", {})
+    for row, left, right in (
+        (0, ("VPS CPU", "cpu"), ("Load", "load")),
+        (1, ("SWAP", "swap"), ("MEM", "mem")),
+        (2, ("TEMP", "temp"), ("DISK", "disk")),
+        (3, ("TCP 8.8.8.8", "ping"), ("Uptime", "uptime")),
+        (4, ("RX Mbps", "rx"), ("TX Mbps", "tx")),
+    ):
+        x = COL_W + pad
+        y = (HEIGHT - 5 * row_h) // 2 + row * row_h
+        _stat(draw, img, x, y, left[0], vps.get(left[1], "--"))
+        _stat(draw, img, x + right_off, y, right[0], vps.get(right[1], "--"))
+
+    # Column 2: crypto — BTC/ETH with Fear & Greed's label/value stacked to
     # their right (label alongside BTC, number alongside ETH underneath it -
     # frees a whole row versus Fear & Greed having its own line), who's
     # home, a separator, then weather for Playa del Ingles and Newton
     # Aycliffe.
-    x1 = COL_W + pad
+    x1 = 2 * COL_W + pad
     hero_row_h = 96
     small_row_h = 70
     sep_gap = 14
-    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + 2 * sep_gap)) // 2
+    device_row_h = SMALL_LABEL_FONT.size + 4
+    y = (HEIGHT - (2 * hero_row_h + 3 * small_row_h + 2 * sep_gap + device_row_h)) // 2
     _stat(draw, img, x1, y, "BTC", state.get("btc", "--"), logo=BTC_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("btc_trend"))
     # Just the number, not "71 Greed" - the full text is as wide as BTC's
     # own price+trend-arrow line, so it's narrow enough to sit clear of the
@@ -1014,41 +1094,18 @@ def render_frame(state):
     y += hero_row_h
     _stat(draw, img, x1, y, "ETH", state.get("eth", "--"), logo=ETH_LOGO, value_font=HERO_VALUE_FONT, trend=state.get("eth_trend"))
     y += hero_row_h
-    draw.line([(x1, y + sep_gap // 2), (2 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
+    draw.line([(x1, y + sep_gap // 2), (3 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
     y += sep_gap
     _stat(draw, img, x1, y, PERSON1_NAME, state.get("person1_status", "--"), value_font=MEDIUM_VALUE_FONT)
     _stat(draw, img, x1 + right_off, y, PERSON2_NAME, state.get("person2_status", "--"), value_font=MEDIUM_VALUE_FONT)
     y += small_row_h
-    draw.line([(x1, y + sep_gap // 2), (2 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
+    draw.text((x1, y), state.get("person1_devices", ""), font=SMALL_LABEL_FONT, fill=LABEL_COLOR)
+    y += device_row_h
+    draw.line([(x1, y + sep_gap // 2), (3 * COL_W - pad, y + sep_gap // 2)], fill=LABEL_COLOR, width=1)
     y += sep_gap
     _stat(draw, img, x1, y, "Playa del Ingles", state.get("weather_playa", "--"), value_font=MEDIUM_VALUE_FONT)
     y += small_row_h
     _stat(draw, img, x1, y, "Newton Aycliffe", state.get("weather_newton", "--"), value_font=MEDIUM_VALUE_FONT)
-
-    # Column 2: BeatMyLanding — total users/online/flying split out, new
-    # users/landings today paired, latest traffic alongside landings,
-    # SEO clicks/impressions.
-    x2 = 2 * COL_W + pad
-    row_h = 90
-    y = 28
-    _stat(draw, img, x2, y, "Total Users", state.get("bml_total", "--"), logo=BML_LOGO)
-    _stat(draw, img, x2 + right_off, y, "Online", state.get("bml_online", "--"))
-    y += row_h
-    _stat(draw, img, x2, y, "Flying", state.get("bml_flying", "--"))
-    _stat(draw, img, x2 + right_off, y, "New users", state.get("bml_usrs", "--"))
-    y += row_h
-    _stat(draw, img, x2, y, "Landings", state.get("bml_lnds", "--"))
-    tx = x2 + right_off
-    draw.text((tx, y), "Latest traffic", font=LABEL_FONT, fill=LABEL_COLOR)
-    traffic_line_y = y + LABEL_FONT.size + 6
-    draw.text((tx, traffic_line_y), state.get("traffic_who", "--"), font=SMALL_LABEL_FONT, fill=VALUE_COLOR)
-    draw.text((tx, traffic_line_y + SMALL_LABEL_FONT.size + 4), state.get("traffic_where", "--"), font=SMALL_LABEL_FONT, fill=VALUE_COLOR)
-    traffic_block_h = LABEL_FONT.size + 6 + 2 * SMALL_LABEL_FONT.size + 4
-    y += max(row_h - 20, traffic_block_h + 10)
-    draw.line([(x2, y), (3 * COL_W - pad, y)], fill=LABEL_COLOR, width=1)
-    y += 20
-    _stat(draw, img, x2, y, "Clicks (7d)", state.get("seo_clicks", "--"))
-    _stat(draw, img, x2 + right_off, y, "Impressions", state.get("seo_impressions", "--"))
 
     # Column 3: social — Discord, YouTube, TikTok, AdSense, each a paired row.
     x3 = 3 * COL_W + pad
@@ -1066,6 +1123,61 @@ def render_frame(state):
     _stat(draw, img, x3, y, "Today", state.get("adsense_today", "--"))
     _stat(draw, img, x3 + right_off, y, "Yesterday", state.get("adsense_yesterday", "--"))
 
+    return img
+
+
+def render_second_frame(stats):
+    img = ImageEnhance.Brightness(BACKGROUND).enhance(0.6)
+    draw = ImageDraw.Draw(img)
+    for x in (WIDTH // 3, 2 * WIDTH // 3):
+        draw.line([(x, 20), (x, HEIGHT - 20)], fill=LABEL_COLOR, width=1)
+    draw.text((24, 12), "Global Vectors", font=VALUE_FONT, fill=VALUE_COLOR)
+    if stats.get("partial"):
+        draw.text((464, 26), "Partial", font=SMALL_LABEL_FONT, fill=LABEL_COLOR)
+    for x, y, label, key in (
+        (24, 72, "Registered", "registered"),
+        (344, 72, "Approved", "approved"),
+        (24, 140, "Awaiting access", "not_approved"),
+    ):
+        _stat(draw, img, x, y, label, str(stats.get(key, "--")),
+              label_font=SMALL_LABEL_FONT, value_font=MEDIUM_VALUE_FONT)
+    draw.line([(24, 212), (WIDTH // 3 - 24, 212)], fill=LABEL_COLOR, width=1)
+    for x, y, label, key in (
+        (24, 230, "Server players", "players"),
+        (344, 230, "Server CPU", "cpu"),
+        (24, 300, "Memory (MB)", "mem_mb"),
+        (344, 300, "Worst loss", "worst_loss"),
+        (24, 370, "In (kbps)", "in_kbps"),
+        (344, 370, "Out (kbps)", "out_kbps"),
+    ):
+        value = stats.get(key)
+        text = "--" if value is None else (str(value) if key == "players" else f"{value:.1f}")
+        _stat(draw, img, x, y, label, text,
+              label_font=SMALL_LABEL_FONT, value_font=MEDIUM_VALUE_FONT)
+
+    # BeatMyLanding occupies the middle column on the second panel.
+    x2 = WIDTH // 3 + 24
+    right_off = WIDTH // 6 + 4
+    row_h = 90
+    y = 28
+    _stat(draw, img, x2, y, "Total Users", stats.get("bml_total", "--"), logo=BML_LOGO)
+    _stat(draw, img, x2 + right_off, y, "Online", stats.get("bml_online", "--"))
+    y += row_h
+    _stat(draw, img, x2, y, "Flying", stats.get("bml_flying", "--"))
+    _stat(draw, img, x2 + right_off, y, "New users", stats.get("bml_usrs", "--"))
+    y += row_h
+    _stat(draw, img, x2, y, "Landings", stats.get("bml_lnds", "--"))
+    tx = x2 + right_off
+    draw.text((tx, y), "Latest traffic", font=LABEL_FONT, fill=LABEL_COLOR)
+    traffic_line_y = y + LABEL_FONT.size + 6
+    draw.text((tx, traffic_line_y), stats.get("traffic_who", "--"), font=SMALL_LABEL_FONT, fill=VALUE_COLOR)
+    draw.text((tx, traffic_line_y + SMALL_LABEL_FONT.size + 4), stats.get("traffic_where", "--"), font=SMALL_LABEL_FONT, fill=VALUE_COLOR)
+    traffic_block_h = LABEL_FONT.size + 6 + 2 * SMALL_LABEL_FONT.size + 4
+    y += max(row_h - 20, traffic_block_h + 10)
+    draw.line([(x2, y), (2 * WIDTH // 3 - 24, y)], fill=LABEL_COLOR, width=1)
+    y += 20
+    _stat(draw, img, x2, y, "Clicks (7d)", stats.get("seo_clicks", "--"))
+    _stat(draw, img, x2 + right_off, y, "Impressions", stats.get("seo_impressions", "--"))
     return img
 
 
@@ -1119,6 +1231,11 @@ def main():
     panel = LyPanel()
     _open_panel_with_recovery(panel)
     log("Panel opened.")
+    second_panel = LyPanel(serial_number="2025E7B071A9")
+    second_last_state = None
+    second_retry_time = 0
+    second_data = {}
+    last_global_vectors_fetch_time = 0
 
     psutil.cpu_percent(interval=None)
     prev_net = get_net_counters()
@@ -1137,6 +1254,7 @@ def main():
     last_seo_fetch_time = 0
     last_fear_greed_fetch_time = 0
     last_weather_fetch_time = 0
+    last_vps_fetch_time = 0
     last_phone_check_time = 0
     phone_miss_streak = 0
     phone_home = True
@@ -1163,6 +1281,17 @@ def main():
             with _pending_lock:
                 pending = dict(_pending)
                 _pending.clear()
+            previous_second_data = dict(second_data)
+            if "global_vectors_drivers" in pending:
+                second_data.update(pending["global_vectors_drivers"])
+            if "global_vectors_server_totals" in pending:
+                second_data.update(pending["global_vectors_server_totals"])
+            if second_data != previous_second_data:
+                log(f"Global Vectors counts updated: {second_data}")
+            if "vps" in pending:
+                if "vps" not in state:
+                    log(f"VPS stats connected: {pending['vps']}")
+                state["vps"] = pending["vps"]
             if "btc" in pending:
                 price = pending["btc"]
                 if last_btc_price is not None and price != last_btc_price:
@@ -1209,6 +1338,10 @@ def main():
                         phone_home = False
                         log(f"Phone ({PHONE_IP}) hasn't answered in {phone_miss_streak} checks - treating as away, dimming to black")
             if "person1_present" in pending:
+                devices = pending["person1_present"]
+                if devices != state.get("person1_devices", ""):
+                    log(f"{PERSON1_NAME} detected phones: {devices or 'none'}")
+                state["person1_devices"] = devices
                 if pending["person1_present"]:
                     person1_miss_streak = 0
                     if not person1_home:
@@ -1309,6 +1442,15 @@ def main():
 
             values, prev_net, prev_time = sample_metrics(prev_net, prev_time)
             state.update(values)
+            if now - last_vps_fetch_time >= 5 or last_vps_fetch_time == 0:
+                last_vps_fetch_time = now
+                _schedule_fetch("vps", fetch_vps_metrics)
+            factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR
+
+            if now - last_global_vectors_fetch_time >= 15 or last_global_vectors_fetch_time == 0:
+                last_global_vectors_fetch_time = now
+                _schedule_fetch("global_vectors_drivers", fetch_global_vectors_drivers)
+                _schedule_fetch("global_vectors_server_totals", fetch_global_vectors_server_totals)
 
             # Full-frame-only protocol: only bother re-encoding when
             # something actually changed, since a full re-render + JPEG
@@ -1319,13 +1461,37 @@ def main():
             # outright - see KEEPALIVE_SECONDS above.
             if state != last_sent_state:
                 frame = render_frame(state)
-                factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR
                 panel.send_image(frame, brightness_factor=factor)
                 last_sent_state = dict(state)
                 last_send_time = now
             elif now - last_send_time >= KEEPALIVE_SECONDS:
                 panel.resend_last()
                 last_send_time = now
+
+            if now >= second_retry_time:
+                try:
+                    if second_panel.dev is None:
+                        second_panel.open()
+                        second_last_state = None
+                        log(f"Second panel opened: {second_panel.serial_number}")
+                    second_factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else 0.5
+                    second_display_data = {**second_data, **{
+                        key: state.get(key, "--") for key in (
+                            "bml_total", "bml_online", "bml_flying", "bml_usrs", "bml_lnds",
+                            "traffic_who", "traffic_where", "seo_clicks", "seo_impressions",
+                        )
+                    }}
+                    second_state = (second_display_data, second_factor)
+                    if second_state != second_last_state:
+                        second_frame = render_second_frame(second_display_data)
+                        second_panel.send_image(second_frame.transpose(Image.Transpose.ROTATE_180), brightness_factor=second_factor)
+                        second_last_state = second_state
+                    else:
+                        second_panel.resend_last()
+                except Exception as e:
+                    log(f"Second panel update failed: {e!r}")
+                    second_panel.close()
+                    second_retry_time = now + 5
 
             time.sleep(SAMPLE_SECONDS)
 
@@ -1367,6 +1533,7 @@ def main():
             log(f"Update failed: {e!r}")
             time.sleep(1.0)
 
+    second_panel.close()
     panel.close()
 
 
