@@ -242,3 +242,15 @@ log shows successful panel frames and the affected feed update. Preserve
 `.smtp-daily.json` across deployments: losing it starts another partial day.
 Review the entire staged diff before publishing; private configuration, logs,
 mailbox passwords and generated previews must stay out of GitHub.
+
+<!-- support-footer -->
+---
+
+## Support / donate
+
+This project is free. If it saved you some hassle and you'd like to chuck a few quid my way, it's genuinely appreciated — but never required.
+
+- ☕ **Buy Me a Coffee:** https://buymeacoffee.com/craigybabyj
+- 💸 **PayPal:** [craigyj1977@gmail.com](https://www.paypal.com/donate/?business=craigyj1977@gmail.com&no_recurring=0)
+- 💬 **Discord:** https://discord.craigybabyj.com
+- 🌐 **Website:** https://craigybabyj.com
