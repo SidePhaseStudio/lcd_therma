@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import select
 import struct
 import subprocess
 import threading
@@ -14,6 +15,8 @@ import requests
 import usb.core
 import usb.util
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageStat
+from stalwart_metrics import fetch_stalwart_submissions
+from unread_mail import fetch_unread_mail, merge_counts
 
 
 def log(msg):
@@ -438,11 +441,11 @@ _hanger_env = _read_env_file("/home/craig/projects/hanger-bot/.env")
 DISCORD_BOT_TOKEN = _hanger_env.get("DISCORD_TOKEN", "")
 
 _bml_env = _read_env_file("/home/craig/projects/beatmylanding/api/.env")
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", _bml_env.get("BREVO_API_KEY", ""))
 BML_ADMIN_SECRET = _bml_env.get("API_ADMIN_INTERNAL_SECRET", "")
 BML_DASHBOARD_URL = "http://localhost:4001/v1/internal/admin/dashboard?days=1"
 BML_DASHBOARD_REFRESH_SECONDS = 60
 DISCORD_GUILD_ID = "1047463607010603058"
-DISCORD_API_URL = f"https://discord.com/api/v10/guilds/{DISCORD_GUILD_ID}?with_counts=true"
 DISCORD_REFRESH_SECONDS = 60
 
 
@@ -795,10 +798,29 @@ def fetch_bml_today():
         return None
 
 
-def fetch_discord_stats():
+def fetch_brevo_sent_today():
+    if not BREVO_API_KEY:
+        return None
     try:
-        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-        r = requests.get(DISCORD_API_URL, headers=headers, timeout=5)
+        response = requests.get("https://api.brevo.com/v3/account",
+                                headers={"api-key": BREVO_API_KEY}, timeout=5)
+        response.raise_for_status()
+        plan = next(plan for plan in response.json()["plan"]
+                    if plan.get("type") == "free" and plan.get("creditsType") == "sendLimit")
+        remaining = plan["credits"]
+        if type(remaining) is not int or not 0 <= remaining <= 300:
+            raise ValueError("Invalid Brevo daily send credits")
+        return 300 - remaining
+    except Exception as e:
+        log(f"Failed to fetch Brevo daily sends: {e!r}")
+        return None
+
+
+def fetch_discord_stats(guild_id=DISCORD_GUILD_ID, token=DISCORD_BOT_TOKEN):
+    try:
+        headers = {"Authorization": f"Bot {token}"}
+        url = f"https://discord.com/api/v10/guilds/{guild_id}?with_counts=true"
+        r = requests.get(url, headers=headers, timeout=5)
         r.raise_for_status()
         data = r.json()
         return {
@@ -807,6 +829,18 @@ def fetch_discord_stats():
         }
     except Exception as e:
         print(f"Failed to fetch Discord stats: {e}")
+        return None
+
+
+def fetch_global_vectors_discord():
+    try:
+        with open("/home/craig/.openclaw/openclaw.json", encoding="utf-8") as config:
+            token = json.load(config)["channels"]["discord"]["token"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("Luke Discord token missing")
+        return fetch_discord_stats("1559305847874650194", token)
+    except Exception as e:
+        log(f"Failed to read Luke Discord configuration: {e!r}")
         return None
 
 
@@ -911,22 +945,62 @@ def sample_metrics(prev_net, prev_time):
     return values, net, now
 
 
-def fetch_vps_metrics():
-    try:
-        with open(os.path.join(ASSET_DIR, "vps_metrics.py"), encoding="utf-8") as source:
-            result = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 "uk.sidephasestudio.com", "python3", "-"],
-                input=source.read(), capture_output=True, text=True, timeout=8, check=True,
+def stream_vps_metrics(stop):
+    keys = ("cpu", "load", "mem", "swap", "disk", "temp", "uptime", "ping", "rx", "tx")
+    while not stop.is_set():
+        process = None
+        try:
+            with open(os.path.join(ASSET_DIR, "vps_metrics.py"), encoding="utf-8") as source:
+                script = source.read()
+            process = subprocess.Popen(
+                ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                 "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+                 "uk.sidephasestudio.com", "python3", "-u", "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
             )
-        metrics = json.loads(result.stdout)
-        keys = ("cpu", "load", "mem", "swap", "disk", "temp", "uptime", "ping", "rx", "tx")
-        if not isinstance(metrics, dict) or any(not isinstance(metrics.get(key), str) for key in keys):
-            raise ValueError("Invalid VPS metrics")
-        return {key: metrics[key] for key in keys}
-    except Exception as e:
-        log(f"Failed to fetch VPS metrics: {e!r}")
-        return None
+            process.stdin.write(script)
+            process.stdin.close()
+            last_sample = time.monotonic()
+            connected = False
+            while not stop.is_set():
+                readable, _, _ = select.select([process.stdout], [], [], 1)
+                if not readable:
+                    if time.monotonic() - last_sample > 15:
+                        raise TimeoutError("No VPS readings for 15 seconds")
+                    continue
+                line = process.stdout.readline()
+                if not line:
+                    raise ConnectionError("VPS SSH stream closed")
+                metrics = json.loads(line)
+                if not isinstance(metrics, dict) or any(not isinstance(metrics.get(key), str) for key in keys):
+                    raise ValueError("Invalid VPS metrics")
+                with _pending_lock:
+                    _pending["vps"] = {key: metrics[key] for key in keys}
+                last_sample = time.monotonic()
+                if not connected:
+                    log(f"VPS SSH stream connected (pid={process.pid})")
+                    connected = True
+        except Exception as e:
+            if not stop.is_set():
+                log(f"VPS SSH stream failed, reconnecting in 5 seconds: {e!r}")
+        finally:
+            if process is not None:
+                if not process.stdin.closed:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                process.stdout.close()
+        if stop.wait(5):
+            break
 
 
 # --- Rendering ---
@@ -970,6 +1044,7 @@ DISCORD_LOGO = _load_logo(os.path.join(ASSET_DIR, "discord_logo.png"), 32)
 YOUTUBE_LOGO = _load_logo(os.path.join(ASSET_DIR, "youtube_logo.png"), 32)
 TIKTOK_LOGO = _load_logo(os.path.join(ASSET_DIR, "tiktok_logo.png"), 32)
 BML_LOGO = _load_logo(os.path.join(ASSET_DIR, "bml_logo.png"), 32)
+GLOBAL_VECTORS_LOGO = _load_logo(os.path.join(ASSET_DIR, "global_vectors_logo.png"), 32)
 
 COL_W = WIDTH // 4
 
@@ -1126,34 +1201,39 @@ def render_frame(state):
     return img
 
 
-def render_second_frame(stats):
+def visible_unread_inboxes(inboxes):
+    return [row for row in inboxes if row.get("count") != 0 or row.get("stale")]
+
+
+def render_second_frame(stats, inboxes=()):
     img = ImageEnhance.Brightness(BACKGROUND).enhance(0.6)
     draw = ImageDraw.Draw(img)
     for x in (WIDTH // 3, 2 * WIDTH // 3):
         draw.line([(x, 20), (x, HEIGHT - 20)], fill=LABEL_COLOR, width=1)
-    draw.text((24, 12), "Global Vectors", font=VALUE_FONT, fill=VALUE_COLOR)
     if stats.get("partial"):
-        draw.text((464, 26), "Partial", font=SMALL_LABEL_FONT, fill=LABEL_COLOR)
+        draw.text((464, 428), "Partial", font=SMALL_LABEL_FONT, fill=LABEL_COLOR)
     for x, y, label, key in (
-        (24, 72, "Registered", "registered"),
-        (344, 72, "Approved", "approved"),
-        (24, 140, "Awaiting access", "not_approved"),
+        (24, 28, "Registered", "registered"),
+        (348, 28, "Server players", "players"),
+        (24, 112, "Awaiting access", "not_approved"),
+        (348, 112, "Approved", "approved"),
     ):
         _stat(draw, img, x, y, label, str(stats.get(key, "--")),
-              label_font=SMALL_LABEL_FONT, value_font=MEDIUM_VALUE_FONT)
-    draw.line([(24, 212), (WIDTH // 3 - 24, 212)], fill=LABEL_COLOR, width=1)
+              logo=GLOBAL_VECTORS_LOGO if key == "registered" else None)
+    draw.line([(24, 274), (WIDTH // 3 - 24, 274)], fill=LABEL_COLOR, width=1)
     for x, y, label, key in (
-        (24, 230, "Server players", "players"),
-        (344, 230, "Server CPU", "cpu"),
-        (24, 300, "Memory (MB)", "mem_mb"),
-        (344, 300, "Worst loss", "worst_loss"),
-        (24, 370, "In (kbps)", "in_kbps"),
-        (344, 370, "Out (kbps)", "out_kbps"),
+        (24, 196, "Server CPU", "cpu"),
+        (348, 196, "Memory (MB)", "mem_mb"),
+        (348, 280, "Worst loss", "worst_loss"),
     ):
         value = stats.get(key)
-        text = "--" if value is None else (str(value) if key == "players" else f"{value:.1f}")
-        _stat(draw, img, x, y, label, text,
-              label_font=SMALL_LABEL_FONT, value_font=MEDIUM_VALUE_FONT)
+        text = "--" if value is None else f"{value:.1f}"
+        _stat(draw, img, x, y, label, text)
+    traffic = "/".join(f"{stats[key]:.1f}" if stats.get(key) is not None else "--"
+                       for key in ("in_kbps", "out_kbps"))
+    _stat(draw, img, 24, 280, "In/Out (kbps)", traffic)
+    _stat(draw, img, 24, 364, "Online", str(stats.get("discord_online", "--")), logo=DISCORD_LOGO)
+    _stat(draw, img, 348, 364, "Members", str(stats.get("discord_total", "--")), logo=DISCORD_LOGO)
 
     # BeatMyLanding occupies the middle column on the second panel.
     x2 = WIDTH // 3 + 24
@@ -1178,6 +1258,27 @@ def render_second_frame(stats):
     y += 20
     _stat(draw, img, x2, y, "Clicks (7d)", stats.get("seo_clicks", "--"))
     _stat(draw, img, x2 + right_off, y, "Impressions", stats.get("seo_impressions", "--"))
+    _stat(draw, img, 2 * WIDTH // 3 + 24, 28, "Emails sent today", stats.get("brevo_sent", "--/300"))
+    smtp_x = 2 * WIDTH // 3 + 344
+    smtp_label = "SMTP sent" + (" (Stale)" if stats.get("smtp_stale") else "")
+    _stat(draw, img, smtp_x, 28, smtp_label, str(stats.get("smtp_sent", "\u2014")))
+    draw.text((smtp_x, 108), stats.get("smtp_period", "Today"), font=SMALL_LABEL_FONT, fill=LABEL_COLOR)
+    mail_x = 2 * WIDTH // 3 + 24
+    visible = visible_unread_inboxes(inboxes)
+    if visible:
+        draw.line([(mail_x, 144), (WIDTH - 24, 144)], fill=LABEL_COLOR, width=1)
+        draw.text((mail_x, 154), "Unread Mail", font=LABEL_FONT, fill=LABEL_COLOR)
+        for index, inbox in enumerate(visible):
+            y = 194 + index * 26
+            font = SMALL_LABEL_FONT
+            while draw.textlength(inbox["label"], font=font) > 400:
+                font = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], font.size - 1)
+            draw.text((mail_x, y), inbox["label"], font=font, fill=VALUE_COLOR)
+            value = str(inbox.get("count", "\u2014")) + (" Stale" if inbox.get("stale") else "")
+            font = SMALL_LABEL_FONT
+            while draw.textlength(value, font=font) > 170:
+                font = load_font(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"], font.size - 1)
+            draw.text((WIDTH - 24, y), value, font=font, fill=VALUE_COLOR, anchor="rt")
     return img
 
 
@@ -1231,10 +1332,15 @@ def main():
     panel = LyPanel()
     _open_panel_with_recovery(panel)
     log("Panel opened.")
+    vps_stop = threading.Event()
+    vps_thread = threading.Thread(target=stream_vps_metrics, args=(vps_stop,), daemon=True)
+    vps_thread.start()
     second_panel = LyPanel(serial_number="2025E7B071A9")
     second_last_state = None
     second_retry_time = 0
     second_data = {}
+    unread_inboxes = []
+    last_unread_fetch_time = 0
     last_global_vectors_fetch_time = 0
 
     psutil.cpu_percent(interval=None)
@@ -1251,10 +1357,11 @@ def main():
     last_tiktok_fetch_time = 0
     last_ping_fetch_time = 0
     last_adsense_fetch_time = 0
+    last_brevo_fetch_time = 0
+    last_stalwart_fetch_time = 0
     last_seo_fetch_time = 0
     last_fear_greed_fetch_time = 0
     last_weather_fetch_time = 0
-    last_vps_fetch_time = 0
     last_phone_check_time = 0
     phone_miss_streak = 0
     phone_home = True
@@ -1286,8 +1393,21 @@ def main():
                 second_data.update(pending["global_vectors_drivers"])
             if "global_vectors_server_totals" in pending:
                 second_data.update(pending["global_vectors_server_totals"])
+            if "global_vectors_discord" in pending:
+                second_data["discord_online"] = pending["global_vectors_discord"]["online"]
+                second_data["discord_total"] = pending["global_vectors_discord"]["total"]
             if second_data != previous_second_data:
                 log(f"Global Vectors counts updated: {second_data}")
+            if "stalwart" in pending:
+                result = pending["stalwart"]
+                if any(second_data.get(key) != value for key, value in result.items()):
+                    log("Stalwart SMTP counter stale" if result["smtp_stale"] else
+                        f"Stalwart SMTP accepted today: {result['smtp_sent']}")
+                second_data.update(result)
+            if "unread_mail" in pending:
+                unread_inboxes = merge_counts(unread_inboxes, pending["unread_mail"])
+                log(f"Unread Mail refreshed: {len(unread_inboxes)} inboxes, "
+                    f"{sum(row['stale'] for row in unread_inboxes)} stale")
             if "vps" in pending:
                 if "vps" not in state:
                     log(f"VPS stats connected: {pending['vps']}")
@@ -1368,6 +1488,11 @@ def main():
             if "ping" in pending:
                 ms = pending["ping"]
                 state["ping"] = f"{ms:.0f}ms" if ms >= 0 else "Timeout"
+            if "brevo_sent" in pending:
+                used = f"{pending['brevo_sent']}/300"
+                if state.get("brevo_sent") != used:
+                    log(f"Brevo emails sent today: {used}")
+                state["brevo_sent"] = used
             if "adsense" in pending:
                 a = pending["adsense"]
                 state["adsense_today"] = f"£{a['today']:.2f}"
@@ -1408,6 +1533,7 @@ def main():
             if now - last_discord_fetch_time >= DISCORD_REFRESH_SECONDS or last_discord_fetch_time == 0:
                 last_discord_fetch_time = now
                 _schedule_fetch("discord", fetch_discord_stats)
+                _schedule_fetch("global_vectors_discord", fetch_global_vectors_discord)
             if now - last_youtube_fetch_time >= YOUTUBE_REFRESH_SECONDS or last_youtube_fetch_time == 0:
                 last_youtube_fetch_time = now
                 _schedule_fetch("youtube", fetch_youtube_stats)
@@ -1427,6 +1553,15 @@ def main():
             if now - last_person2_check_time >= HOUSEHOLD_CHECK_SECONDS or last_person2_check_time == 0:
                 last_person2_check_time = now
                 _schedule_fetch("person2_present", fetch_person2_reachable)
+            if now - last_brevo_fetch_time >= 600 or last_brevo_fetch_time == 0:
+                last_brevo_fetch_time = now
+                _schedule_fetch("brevo_sent", fetch_brevo_sent_today)
+            if now - last_stalwart_fetch_time >= 60 or last_stalwart_fetch_time == 0:
+                last_stalwart_fetch_time = now
+                _schedule_fetch("stalwart", fetch_stalwart_submissions)
+            if now - last_unread_fetch_time >= 600 or last_unread_fetch_time == 0:
+                last_unread_fetch_time = now
+                _schedule_fetch("unread_mail", fetch_unread_mail)
             if now - last_adsense_fetch_time >= ADSENSE_REFRESH_SECONDS or last_adsense_fetch_time == 0:
                 last_adsense_fetch_time = now
                 _schedule_fetch("adsense", fetch_adsense_earnings)
@@ -1442,9 +1577,6 @@ def main():
 
             values, prev_net, prev_time = sample_metrics(prev_net, prev_time)
             state.update(values)
-            if now - last_vps_fetch_time >= 5 or last_vps_fetch_time == 0:
-                last_vps_fetch_time = now
-                _schedule_fetch("vps", fetch_vps_metrics)
             factor = QUIET_BRIGHTNESS_FACTOR if (in_quiet_hours() or not phone_home) else BRIGHTNESS_FACTOR
 
             if now - last_global_vectors_fetch_time >= 15 or last_global_vectors_fetch_time == 0:
@@ -1478,12 +1610,12 @@ def main():
                     second_display_data = {**second_data, **{
                         key: state.get(key, "--") for key in (
                             "bml_total", "bml_online", "bml_flying", "bml_usrs", "bml_lnds",
-                            "traffic_who", "traffic_where", "seo_clicks", "seo_impressions",
+                            "traffic_who", "traffic_where", "seo_clicks", "seo_impressions", "brevo_sent",
                         )
                     }}
-                    second_state = (second_display_data, second_factor)
+                    second_state = (second_display_data, unread_inboxes, second_factor)
                     if second_state != second_last_state:
-                        second_frame = render_second_frame(second_display_data)
+                        second_frame = render_second_frame(second_display_data, unread_inboxes)
                         second_panel.send_image(second_frame.transpose(Image.Transpose.ROTATE_180), brightness_factor=second_factor)
                         second_last_state = second_state
                     else:
@@ -1533,6 +1665,8 @@ def main():
             log(f"Update failed: {e!r}")
             time.sleep(1.0)
 
+    vps_stop.set()
+    vps_thread.join(timeout=5)
     second_panel.close()
     panel.close()
 

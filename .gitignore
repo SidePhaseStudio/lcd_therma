@@ -30,3 +30,6 @@ lcd.log
 .DS_Store
 Thumbs.db
 
+
+.smtp-daily.json
+.smtp-daily-*

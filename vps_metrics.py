@@ -69,5 +69,12 @@ def collect_metrics():
     }
 
 
+def stream_metrics():
+    while True:
+        started = time.monotonic()
+        print(json.dumps(collect_metrics()), flush=True)
+        time.sleep(max(0, 5 - (time.monotonic() - started)))
+
+
 if __name__ == "__main__":
-    print(json.dumps(collect_metrics()))
+    stream_metrics()

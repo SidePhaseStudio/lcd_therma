@@ -1,5 +1,32 @@
 # lcd_therma — Handover
 
+## Current handover — 14 November 2026
+
+The original build notes below are historical. Use README.md and AGENTS.md for
+the current layout, configuration, checks, and operating rules.
+
+- One `lcd_therma.service` drives two serial-selected 1920×462 USB panels.
+  The original shows local/VPS metrics, crypto/presence/weather and social stats.
+  The second shows Global Vectors, BeatMyLanding and mail statistics; it is
+  rotated 180 degrees, with its background darkened separately from the text.
+- VPS metrics use one persistent SSH stream with reconnect handling.
+- Brevo shows daily free-plan usage out of 300, refreshed every ten minutes.
+- SMTP polls Stalwart every minute and saves daily increments to
+  `.smtp-daily.json`, using Europe/London dates. LCD restarts preserve the count.
+  The first day is labelled `Today from HH:MM`; historical sends are unavailable.
+  Polling can misattribute sends near midnight and miss sends before an
+  unobserved Stalwart counter reset. Do not delete this runtime state to deploy.
+- Unread Mail uses read-only JMAP queries for ten support inboxes every ten
+  minutes. Fresh zeroes are hidden; failures remain visible as stale. Credentials
+  live only in `.env.mailboxes.json`, configured through `unread_mail.py`.
+- Global Vectors uses the existing private admin token and Luke Discord config.
+  Stalwart credentials are entered privately through `stalwart_metrics.py`.
+  Never publish credentials, runtime state, logs, or the virtualenv.
+- Daily SMTP logic, rendering, mail auth/error paths, and the second-panel
+  integration have runnable `test_*.py` checks. See README.md for the command.
+
+## Historical original build notes
+
 > **2026-09-20 correction**: this document (and the original build) assumed
 > the panel's wire resolution was 1920x480, taken from the product's own
 > marketed spec. It's actually **1920x462** — the vendor's real firmware
